@@ -302,6 +302,22 @@ class OffloadingConnectorWorker:
             success = self.worker.submit_load(job_id, entry.src_spec, entry.dst_spec)
             assert success
 
+    def wait_for_loads(self, request_ids: set[str]) -> None:
+        """Fence in-flight loads for a subset of requests.
+
+        Layer-pipelined connectors use this at the attention-layer boundary.
+        Completion reporting remains in ``get_finished`` so scheduler state is
+        updated through the same path as the regular offloading connector.
+        """
+        assert self.worker is not None
+        job_ids = {
+            job_id
+            for job_id, req_id in self._load_jobs.items()
+            if req_id in request_ids
+        }
+        if job_ids:
+            self.worker.wait(job_ids)
+
     def prepare_store_kv(self, metadata: OffloadingConnectorMetadata):
         for job_id, entry in metadata.store_jobs.items():
             # NOTE(orozery): defer the store to the beginning of the next

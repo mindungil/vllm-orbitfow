@@ -1415,10 +1415,42 @@ def get_kv_cache_config_from_groups(
                 KVCacheTensor(size=page_size * num_blocks, shared_by=shared_by)
             )
 
+    from vllm.v1.orbitflow.config import is_orbitflow_enabled
+
+    orbitflow_num_staging_blocks = 0
+    orbitflow_num_resident_layers = 0
+    orbitflow_num_staging_banks = 1
+    if is_orbitflow_enabled(vllm_config):
+        extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config or {}
+        requested = int(extra_config.get("num_staging_blocks", 0))
+        if requested < 0:
+            raise ValueError("num_staging_blocks must be non-negative")
+        if requested >= num_blocks:
+            raise ValueError(
+                "num_staging_blocks must be smaller than the GPU KV block count"
+            )
+        orbitflow_num_staging_blocks = requested
+        orbitflow_num_staging_banks = int(extra_config.get("prefetch_distance", 2)) + 1
+        if requested and requested < orbitflow_num_staging_banks:
+            raise ValueError(
+                "num_staging_blocks must be at least prefetch_distance + 1"
+            )
+        num_layers = len(kv_cache_groups)
+        orbitflow_num_resident_layers = int(
+            extra_config.get("num_resident_layers", num_layers)
+        )
+        if not 0 <= orbitflow_num_resident_layers <= num_layers:
+            raise ValueError(
+                "num_resident_layers must be between zero and the model layer count"
+            )
+
     return KVCacheConfig(
         num_blocks=num_blocks,
         kv_cache_tensors=kv_cache_tensors,
         kv_cache_groups=kv_cache_groups,
+        orbitflow_num_staging_blocks=orbitflow_num_staging_blocks,
+        orbitflow_num_resident_layers=orbitflow_num_resident_layers,
+        orbitflow_num_staging_banks=orbitflow_num_staging_banks,
     )
 
 
@@ -1777,6 +1809,29 @@ def get_kv_cache_groups(
         # This returns an empty list to allow for the KVCacheManager to handle
         # attention free models.
         return []
+
+    from vllm.v1.orbitflow.config import is_orbitflow_enabled
+
+    if is_orbitflow_enabled(vllm_config):
+        if vllm_config.scheduler_config.disable_hybrid_kv_cache_manager:
+            raise ValueError(
+                "OrbitFlow requires the hybrid KV cache manager because each "
+                "attention layer needs an independent block table."
+            )
+        unsupported = [
+            layer_name
+            for layer_name, layer_spec in kv_cache_spec.items()
+            if not isinstance(layer_spec, FullAttentionSpec)
+        ]
+        if unsupported:
+            raise NotImplementedError(
+                "OrbitFlow currently supports dense full-attention layers only; "
+                f"unsupported layers: {unsupported}"
+            )
+        return [
+            KVCacheGroupSpec(layer_names=[layer_name], kv_cache_spec=layer_spec)
+            for layer_name, layer_spec in kv_cache_spec.items()
+        ]
 
     if is_kv_cache_spec_uniform(kv_cache_spec):
         # KV cache of all layers are the same, which is true for

@@ -24,6 +24,7 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
     SlidingWindowSpec,
 )
+from vllm.v1.orbitflow.block_manager import OrbitFlowStagingBlockManager
 from vllm.v1.request import Request
 
 
@@ -126,6 +127,12 @@ class KVCacheCoordinator(ABC):
         _validate_prefix_cache_retention_interval(
             self.retention_interval, self.scheduler_block_size, kv_cache_config
         )
+
+    def set_request_resident_layers(
+        self, request_id: str, resident_layers: frozenset[int]
+    ) -> None:
+        """Configure request-specific residence when supported."""
+        return None
 
     def get_num_blocks_to_allocate(
         self,
@@ -430,6 +437,178 @@ class KVCacheCoordinatorNoPrefixCache(KVCacheCoordinator):
             [] for _ in range(self.num_single_type_manager)
         )
         return blocks, 0, 0
+
+
+class OrbitFlowKVCacheCoordinator(KVCacheCoordinatorNoPrefixCache):
+    """No-prefix coordinator with resident groups and virtual staging groups."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        config = self.kv_cache_config
+        self._num_resident = config.orbitflow_num_resident_layers
+        self._offloaded_group_ids = range(
+            self._num_resident, len(self.single_type_managers)
+        )
+        self._request_resident_layers: dict[str, frozenset[int]] = {}
+        self.staging = OrbitFlowStagingBlockManager(
+            self.block_pool,
+            config.orbitflow_num_staging_blocks,
+            config.orbitflow_num_staging_banks,
+        )
+
+    def set_request_resident_layers(
+        self, request_id: str, resident_layers: frozenset[int]
+    ) -> None:
+        if any(
+            manager.req_to_blocks.get(request_id)
+            for manager in self.single_type_managers
+        ):
+            current = self._resident_layers(request_id)
+            if current != resident_layers:
+                raise RuntimeError(
+                    "cannot change OrbitFlow residence while request blocks "
+                    "are allocated"
+                )
+            return
+        num_groups = len(self.single_type_managers)
+        if any(layer < 0 or layer >= num_groups for layer in resident_layers):
+            raise ValueError("resident layer index is out of range")
+        self._request_resident_layers[request_id] = resident_layers
+
+    def _resident_layers(self, request_id: str) -> frozenset[int]:
+        return self._request_resident_layers.get(
+            request_id, frozenset(range(self._num_resident))
+        )
+
+    def migrate_request(self, request_id: str, resident_layers: frozenset[int]) -> None:
+        current_layers = self._resident_layers(request_id)
+        if current_layers == resident_layers:
+            return
+        num_groups = len(self.single_type_managers)
+        if any(layer < 0 or layer >= num_groups for layer in resident_layers):
+            raise ValueError("resident layer index is out of range")
+
+        # Demotions release permanent blocks first, making them available to
+        # promotions in the same atomic reconfiguration.
+        for gid in sorted(current_layers - resident_layers):
+            manager = self.single_type_managers[gid]
+            old_blocks = manager.pop_blocks_for_free(request_id)
+            required = len(old_blocks)
+            bank = gid % self.staging.num_banks
+            virtual = self.staging.as_virtual_blocks(request_id, required, bank)
+            manager.req_to_blocks[request_id] = virtual
+            manager.num_cached_block[request_id] = 0
+            self.block_pool.free_blocks(reversed(old_blocks))
+
+        for gid in sorted(resident_layers - current_layers):
+            manager = self.single_type_managers[gid]
+            virtual = manager.req_to_blocks.pop(request_id, [])
+            manager.num_cached_block.pop(request_id, None)
+            permanent = self.block_pool.get_new_blocks(len(virtual))
+            manager.req_to_blocks[request_id] = permanent
+            manager.num_cached_block[request_id] = 0
+
+        self._request_resident_layers[request_id] = resident_layers
+
+    def get_num_blocks_to_allocate(
+        self,
+        request_id: str,
+        num_tokens: int,
+        new_computed_blocks: tuple[Sequence[KVCacheBlock], ...],
+        num_encoder_tokens: int,
+        total_computed_tokens: int,
+        num_local_computed_tokens: int,
+        num_tokens_main_model: int,
+        apply_admission_cap: bool = False,
+    ) -> int:
+        count = 0
+        resident_layers = self._resident_layers(request_id)
+        for gid, manager in enumerate(self.single_type_managers):
+            if gid not in resident_layers:
+                continue
+            count += manager.get_num_blocks_to_allocate(
+                request_id,
+                num_tokens,
+                new_computed_blocks[gid],
+                total_computed_tokens,
+                num_local_computed_tokens,
+                num_tokens_main_model,
+                apply_admission_cap=apply_admission_cap,
+            )
+        offloaded = [
+            gid
+            for gid in range(len(self.single_type_managers))
+            if gid not in resident_layers
+        ]
+        if offloaded:
+            first_offloaded = offloaded[0]
+            block_size = self.single_type_managers[first_offloaded].block_size
+            required = cdiv(num_tokens, block_size)
+            current = len(
+                self.single_type_managers[first_offloaded].req_to_blocks.get(
+                    request_id, ()
+                )
+            )
+            if required > current + self.staging.num_free_blocks:
+                return self.block_pool.num_gpu_blocks
+        return count
+
+    def allocate_new_blocks(
+        self,
+        request_id: str,
+        num_tokens: int,
+        num_tokens_main_model: int,
+        num_encoder_tokens: int = 0,
+    ) -> tuple[list[KVCacheBlock], ...]:
+        allocated: list[list[KVCacheBlock]] = []
+        staging_blocks_by_bank: dict[int, list[KVCacheBlock]] = {}
+        resident_layers = self._resident_layers(request_id)
+        for gid, manager in enumerate(self.single_type_managers):
+            if gid in resident_layers:
+                allocated.append(
+                    manager.allocate_new_blocks(
+                        request_id, num_tokens, num_tokens_main_model
+                    )
+                )
+                continue
+            required = cdiv(num_tokens, manager.block_size)
+            current = manager.req_to_blocks[request_id]
+            bank = gid % self.staging.num_banks
+            staging_blocks = staging_blocks_by_bank.get(bank)
+            if staging_blocks is None:
+                staging_blocks = self.staging.as_virtual_blocks(
+                    request_id, required, bank
+                )
+                staging_blocks_by_bank[bank] = staging_blocks
+            new_blocks = staging_blocks[len(current) : required]
+            current.extend(new_blocks)
+            manager.num_cached_block[request_id] = 0
+            allocated.append(new_blocks)
+        return tuple(allocated)
+
+    def free(self, request_id: str) -> None:
+        resident_layers = self._resident_layers(request_id)
+        for gid, manager in enumerate(self.single_type_managers):
+            if gid in resident_layers:
+                manager.free(request_id)
+            else:
+                manager.req_to_blocks.pop(request_id, None)
+                manager.num_cached_block.pop(request_id, None)
+        self.staging.release(request_id)
+        self._request_resident_layers.pop(request_id, None)
+
+    def pop_blocks_for_free(self, request_id: str) -> list[KVCacheBlock]:
+        blocks: list[KVCacheBlock] = []
+        resident_layers = self._resident_layers(request_id)
+        for gid, manager in enumerate(self.single_type_managers):
+            if gid in resident_layers:
+                blocks.extend(manager.pop_blocks_for_free(request_id))
+            else:
+                manager.req_to_blocks.pop(request_id, None)
+                manager.num_cached_block.pop(request_id, None)
+        self.staging.release(request_id)
+        self._request_resident_layers.pop(request_id, None)
+        return blocks
 
 
 class UnitaryKVCacheCoordinator(KVCacheCoordinator):
@@ -861,6 +1040,21 @@ def get_kv_cache_coordinator(
     hash_block_size: int,
     metrics_collector: KVCacheMetricsCollector | None = None,
 ) -> KVCacheCoordinator:
+    if kv_cache_config.orbitflow_num_staging_blocks:
+        if enable_caching:
+            raise ValueError("OrbitFlow staging requires prefix caching to be disabled")
+        return OrbitFlowKVCacheCoordinator(
+            kv_cache_config,
+            max_model_len,
+            max_in_flight_tokens,
+            use_eagle,
+            enable_kv_cache_events,
+            dcp_world_size=dcp_world_size,
+            pcp_world_size=pcp_world_size,
+            scheduler_block_size=scheduler_block_size,
+            hash_block_size=hash_block_size,
+            metrics_collector=metrics_collector,
+        )
     if not enable_caching:
         return KVCacheCoordinatorNoPrefixCache(
             kv_cache_config,

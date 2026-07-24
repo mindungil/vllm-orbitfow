@@ -181,6 +181,11 @@ class KVConnectorBase_V1(ABC):
         """
         return False
 
+    @property
+    def load_before_kv_update(self) -> bool:
+        """Whether staged KV must be loaded before a separate KV update op."""
+        return False
+
     def __init__(
         self,
         vllm_config: "VllmConfig",

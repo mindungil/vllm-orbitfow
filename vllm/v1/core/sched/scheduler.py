@@ -126,6 +126,7 @@ class Scheduler(SchedulerInterface):
         # will have a corresponding KVConnector with Role=WORKER.
         # KV Connector pushes/pull of remote KVs for P/D and offloading.
         self.connector = None
+        self._orbitflow_migrated_req_ids: set[str] = set()
         self.connector_prefix_cache_stats: PrefixCacheStats | None = None
         self.recompute_kv_load_failures = True
         self.defer_block_free = False
@@ -423,6 +424,31 @@ class Scheduler(SchedulerInterface):
 
     def schedule(self, throttle_prefills: bool = False) -> SchedulerOutput:
         self.current_step += 1
+        self._orbitflow_paused_req_ids: set[str] = set()
+        prepare_orbitflow = (
+            getattr(self.connector, "prepare_orbitflow_placement", None)
+            if self.connector is not None
+            else None
+        )
+        if prepare_orbitflow is not None:
+            placement = prepare_orbitflow(self.requests.values(), self.current_step)
+            self._orbitflow_paused_req_ids.update(placement.paused_request_ids)
+            take_migrations = getattr(
+                self.connector, "take_ready_orbitflow_migrations", None
+            )
+            if take_migrations is not None:
+                for req_id, (_, target) in take_migrations().items():
+                    self.kv_cache_manager.migrate_orbitflow_request(
+                        req_id, frozenset(target)
+                    )
+                    self._orbitflow_migrated_req_ids.add(req_id)
+            for request_placement in placement.requests:
+                blocks = self.kv_cache_manager.get_blocks(request_placement.request_id)
+                if not any(blocks.blocks):
+                    self.kv_cache_manager.coordinator.set_request_resident_layers(
+                        request_placement.request_id,
+                        frozenset(request_placement.gpu_layers),
+                    )
         # NOTE(woosuk) on the scheduling algorithm:
         # There's no "decoding phase" nor "prefill phase" in the scheduler.
         # Each request just has the num_computed_tokens and
@@ -469,6 +495,9 @@ class Scheduler(SchedulerInterface):
         req_index = 0
         while req_index < len(self.running) and token_budget > 0:
             request = self.running[req_index]
+            if request.request_id in self._orbitflow_paused_req_ids:
+                req_index += 1
+                continue
 
             if (
                 request.num_output_placeholders > 0
@@ -677,6 +706,10 @@ class Scheduler(SchedulerInterface):
 
                 request = request_queue.peek_request()
                 request_id = request.request_id
+                if request_id in self._orbitflow_paused_req_ids:
+                    request_queue.pop_request()
+                    step_skipped_waiting.prepend_request(request)
+                    continue
 
                 # try to promote blocked statuses while traversing skipped queue.
                 if self._is_blocked_waiting_status(
@@ -1354,9 +1387,14 @@ class Scheduler(SchedulerInterface):
             if not self.use_v2_model_runner:  # noqa: SIM102
                 if req_id not in self.prev_step_scheduled_req_ids:
                     all_token_ids[req_id] = req.all_token_ids.copy()
-            new_block_ids.append(
-                req_to_new_blocks[req_id].get_block_ids(allow_none=True)
-            )
+            if req_id in self._orbitflow_migrated_req_ids:
+                new_block_ids.append(self.kv_cache_manager.get_block_ids(req_id))
+                resumed_req_ids.add(req_id)
+                self._orbitflow_migrated_req_ids.remove(req_id)
+            else:
+                new_block_ids.append(
+                    req_to_new_blocks[req_id].get_block_ids(allow_none=True)
+                )
             num_computed_tokens.append(req.num_computed_tokens)
             num_output_tokens.append(
                 req.num_output_tokens + req.num_output_placeholders

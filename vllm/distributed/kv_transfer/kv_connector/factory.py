@@ -210,6 +210,12 @@ KVConnectorFactory.register_connector(
 )
 
 KVConnectorFactory.register_connector(
+    "OrbitFlowConnector",
+    "vllm.distributed.kv_transfer.kv_connector.v1.orbitflow_connector",
+    "OrbitFlowConnector",
+)
+
+KVConnectorFactory.register_connector(
     "DecodeBenchConnector",
     "vllm.distributed.kv_transfer.kv_connector.v1.decode_bench_connector",
     "DecodeBenchConnector",

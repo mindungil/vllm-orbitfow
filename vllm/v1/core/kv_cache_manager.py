@@ -433,6 +433,16 @@ class KVCacheManager:
         Returns:
             A list of new allocated blocks.
         """
+        params = request.kv_transfer_params or {}
+        raw_resident = params.get("orbitflow_resident_layers")
+        if raw_resident is not None:
+            if not isinstance(raw_resident, (list, tuple)):
+                raise ValueError("orbitflow_resident_layers must be a list")
+            resident_layers = frozenset(int(layer) for layer in raw_resident)
+            self.coordinator.set_request_resident_layers(
+                request.request_id, resident_layers
+            )
+
         # When loading KV data asynchronously, we may have zero new tokens to
         # compute while still allocating slots for externally computed tokens.
         if num_new_tokens == 0 and num_external_computed_tokens == 0:
@@ -689,6 +699,14 @@ class KVCacheManager:
     def get_blocks(self, request_id: str) -> KVCacheBlocks:
         """Get the blocks of a request."""
         return self.create_kv_cache_blocks(self.coordinator.get_blocks(request_id))
+
+    def migrate_orbitflow_request(
+        self, request_id: str, resident_layers: frozenset[int]
+    ) -> None:
+        migrate = getattr(self.coordinator, "migrate_request", None)
+        if migrate is None:
+            raise RuntimeError("OrbitFlow migration is not enabled")
+        migrate(request_id, resident_layers)
 
     def get_block_ids(self, request_id: str) -> tuple[list[int], ...]:
         """Get the block ids of a request."""

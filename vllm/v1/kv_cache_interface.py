@@ -967,6 +967,11 @@ class KVCacheConfig:
     For models with multiple types of attention, there will be multiple groups,
     see `_get_kv_cache_config_uniform_page_size` for more details.
     """
+    # OrbitFlow reserves these physical blocks as a layer-reused staging
+    # window. Zero keeps the regular V1 allocation path unchanged.
+    orbitflow_num_staging_blocks: int = 0
+    orbitflow_num_resident_layers: int = 0
+    orbitflow_num_staging_banks: int = 1
 
     @property
     def has_mamba_layers(self) -> bool:

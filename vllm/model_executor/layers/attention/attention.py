@@ -13,6 +13,7 @@ from vllm.config.vllm import VllmConfig
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.kv_transfer_utils import (
+    maybe_load_kv_before_update,
     maybe_transfer_kv_layer,
 )
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
@@ -781,6 +782,7 @@ def unified_kv_cache_update(
     the data dependency between them to ensure torch.compile preserves ordering.
     """
     layer_name = _resolve_layer_name(layer_name)
+    maybe_load_kv_before_update(layer_name)
     _, attn_layer, kv_cache, layer_slot_mapping = get_attention_context(layer_name)
     if layer_slot_mapping is not None:
         assert hasattr(attn_layer.impl, "do_kv_cache_update"), (

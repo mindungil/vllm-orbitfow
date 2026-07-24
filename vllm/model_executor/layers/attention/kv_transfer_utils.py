@@ -12,6 +12,15 @@ from vllm.distributed.kv_transfer import (
 from vllm.utils.torch_utils import _resolve_layer_name
 
 
+def maybe_load_kv_before_update(layer_name: str) -> None:
+    """Load a staged layer before the backend writes the current token KV."""
+    if not has_kv_transfer_group() or not is_v1_kv_transfer_group():
+        return
+    connector = get_kv_transfer_group()
+    if connector.load_before_kv_update and connector.has_connector_metadata():
+        connector.wait_for_layer_load(layer_name)
+
+
 def maybe_transfer_kv_layer(func: Callable) -> Callable:
     """Decorator that handles KV layer transfer prior and after execution of
     an attention layer, if enabled. Otherwise, the wrapper is a no-op.
