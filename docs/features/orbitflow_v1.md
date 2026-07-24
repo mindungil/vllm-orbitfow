@@ -102,3 +102,25 @@ core changes: per-layer HMA groups, allocator-level staging pages, a
 pre-KV-update connector hook, and full block-table replacement after live
 migration. Consequently it cannot be implemented as an out-of-tree connector
 alone.
+
+## Isolated NVIDIA user-space driver
+
+The loaded NVIDIA kernel module and the user-space driver libraries must have
+matching versions. A mismatch can make NVML fail and can surface later as an
+NCCL initialization error even when a single-GPU CUDA operation succeeds.
+For experiments on Debian or Ubuntu, matching compute libraries can be
+extracted without installing a package or changing the system driver:
+
+```bash
+tools/orbitflow/prepare_nvidia_userspace.sh \
+  580.159.03-1ubuntu1 /data/$USER/nvidia-userspace-580.159.03
+
+NVIDIA_USERSPACE_ROOT=/data/$USER/nvidia-userspace-580.159.03 \
+NVIDIA_DRIVER_VERSION=580.159.03 \
+tools/orbitflow/run_with_nvidia_userspace.sh nvidia-smi
+```
+
+Use the same wrapper for vLLM, `torchrun`, and tests so child worker processes
+inherit the selected `libnvidia-ml`, `libcuda`, and PTX JIT libraries. This
+changes only `LD_LIBRARY_PATH` for the wrapped process tree; it does not load a
+kernel module, install a package, or modify `/usr/lib`.

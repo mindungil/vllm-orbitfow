@@ -217,6 +217,12 @@ class OrbitFlowConnectorScheduler:
                 )
                 if not set(current) - set(target):
                     self._mark_migration_ready(req_id)
+                    # Promotion-only migrations need no deposit barrier and
+                    # are applied by the core scheduler in this same step.
+                    # Keep the worker placement in lockstep with the rewritten
+                    # block tables so promoted layers are force-loaded into
+                    # their new permanent pages before attention consumes them.
+                    current = target
             locked_requests.append(
                 RequestPlacement(
                     request_id=request.request_id,
