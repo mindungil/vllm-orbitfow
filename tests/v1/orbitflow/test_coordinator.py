@@ -97,3 +97,14 @@ def test_residence_migration_rewrites_physical_ownership():
     assert after[1][0].block_id not in staging_ids
     assert after[2][0].block_id == before[2][0].block_id
     assert old_layer0 != after[0][0].block_id
+
+
+def test_migration_releases_unused_staging_bank():
+    coordinator = _coordinator()
+    coordinator.set_request_resident_layers("r", frozenset({0, 2, 3, 4}))
+    coordinator.allocate_new_blocks("r", 16, 16)
+    free_before = coordinator.staging.num_free_blocks
+
+    coordinator.migrate_request("r", frozenset(range(5)))
+
+    assert coordinator.staging.num_free_blocks == free_before + 1

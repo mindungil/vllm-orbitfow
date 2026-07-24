@@ -20,6 +20,9 @@ class OrbitFlowConfig:
     profile_mismatch_ratio: float = 0.2
     max_slo_violations: int = 0
     min_replan_interval_steps: int = 1
+    solver_backend: str = "auto"
+    solver_timeout_ms: int = 20
+    max_plan_steps: int = 1000
 
     def __post_init__(self) -> None:
         if self.num_layers <= 0:
@@ -32,6 +35,12 @@ class OrbitFlowConfig:
             raise ValueError("max_slo_violations must be non-negative")
         if self.min_replan_interval_steps <= 0:
             raise ValueError("min_replan_interval_steps must be positive")
+        if self.solver_backend not in {"auto", "gurobi", "search"}:
+            raise ValueError("solver_backend must be auto, gurobi, or search")
+        if self.solver_timeout_ms <= 0:
+            raise ValueError("solver_timeout_ms must be positive")
+        if self.max_plan_steps <= 0:
+            raise ValueError("max_plan_steps must be positive")
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,6 +51,7 @@ class RequestProfile:
     transfer_ms_per_layer: float
     tbt_slo_ms: float
     deposit_ms: float = 0.0
+    kv_growth_bytes_per_step: float = 0.0
 
     def __post_init__(self) -> None:
         if not self.request_id:
@@ -54,6 +64,8 @@ class RequestProfile:
             raise ValueError("tbt_slo_ms must be positive")
         if self.deposit_ms < 0:
             raise ValueError("deposit_ms must be non-negative")
+        if self.kv_growth_bytes_per_step < 0:
+            raise ValueError("kv_growth_bytes_per_step must be non-negative")
 
 
 @dataclass(frozen=True, slots=True)

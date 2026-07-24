@@ -10,7 +10,7 @@ ORBITFLOW_CONNECTOR_NAME = "OrbitFlowConnector"
 
 
 def is_orbitflow_enabled(vllm_config: "VllmConfig") -> bool:
-    transfer_config = vllm_config.kv_transfer_config
+    transfer_config = getattr(vllm_config, "kv_transfer_config", None)
     return bool(
         transfer_config and transfer_config.kv_connector == ORBITFLOW_CONNECTOR_NAME
     )

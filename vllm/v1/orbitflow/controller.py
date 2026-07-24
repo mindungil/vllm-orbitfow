@@ -50,6 +50,9 @@ class OrbitFlowController:
                     profile_mismatch_ratio=self.config.profile_mismatch_ratio,
                     max_slo_violations=self.config.max_slo_violations,
                     min_replan_interval_steps=self.config.min_replan_interval_steps,
+                    solver_backend=self.config.solver_backend,
+                    solver_timeout_ms=self.config.solver_timeout_ms,
+                    max_plan_steps=self.config.max_plan_steps,
                 )
             )
 

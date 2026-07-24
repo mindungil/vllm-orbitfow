@@ -44,7 +44,7 @@ def test_planner_uses_request_wise_placements() -> None:
 
     assert placement.gpu_bytes <= 500
     assert placement.for_request("expensive").num_gpu_layers == 4
-    assert placement.for_request("cheap").num_gpu_layers == 1
+    assert placement.for_request("cheap").num_gpu_layers == 0
     assert not placement.paused_request_ids
 
 
@@ -82,6 +82,22 @@ def test_token_deposit_can_make_placement_feasible() -> None:
 
     assert placement.for_request("request").gpu_layers == ()
     assert not placement.for_request("request").violates_slo
+
+
+def test_planner_never_pauses_last_request_for_slo_only() -> None:
+    planner = OrbitFlowPlanner(
+        OrbitFlowConfig(num_layers=4, gpu_capacity_bytes=0)
+    )
+
+    placement = planner.plan(
+        [profile("request", transfer_ms=100, slo_ms=1)],
+        epoch=1,
+        step=0,
+        reason=PlacementReason.INITIAL,
+    )
+
+    assert not placement.paused_request_ids
+    assert placement.for_request("request").violates_slo
 
 
 def test_controller_replans_on_batch_change_and_profile_mismatch() -> None:

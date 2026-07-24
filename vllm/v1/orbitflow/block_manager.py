@@ -38,8 +38,16 @@ class OrbitFlowStagingBlockManager:
         self.num_banks = num_banks
         self._blocks = tuple(block_pool.get_new_blocks(num_staging_blocks))
         self._free_ids: list[list[int]] = [[] for _ in range(num_banks)]
-        for index, block in enumerate(reversed(self._blocks)):
-            self._free_ids[index % num_banks].append(block.block_id)
+        block_ids = sorted(block.block_id for block in self._blocks)
+        base, remainder = divmod(len(block_ids), num_banks)
+        offset = 0
+        for bank in range(num_banks):
+            size = base + int(bank < remainder)
+            # pop() then returns ascending IDs, preserving contiguous runs.
+            self._free_ids[bank] = list(
+                reversed(block_ids[offset : offset + size])
+            )
+            offset += size
         self._assignments: dict[tuple[str, int], tuple[int, ...]] = {}
 
     @property
@@ -73,8 +81,13 @@ class OrbitFlowStagingBlockManager:
 
     def release(self, request_id: str) -> None:
         for bank in range(self.num_banks):
-            block_ids = self._assignments.pop((request_id, bank), ())
-            self._free_ids[bank].extend(reversed(block_ids))
+            self.release_bank(request_id, bank)
+
+    def release_bank(self, request_id: str, bank: int) -> None:
+        if not 0 <= bank < self.num_banks:
+            raise ValueError(f"invalid staging bank {bank}")
+        block_ids = self._assignments.pop((request_id, bank), ())
+        self._free_ids[bank].extend(reversed(block_ids))
 
     def as_virtual_blocks(
         self, request_id: str, num_blocks: int, bank: int = 0

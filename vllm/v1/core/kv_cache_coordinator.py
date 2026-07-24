@@ -508,6 +508,15 @@ class OrbitFlowKVCacheCoordinator(KVCacheCoordinatorNoPrefixCache):
             manager.req_to_blocks[request_id] = permanent
             manager.num_cached_block[request_id] = 0
 
+        used_banks = {
+            gid % self.staging.num_banks
+            for gid in range(num_groups)
+            if gid not in resident_layers
+        }
+        for bank in range(self.staging.num_banks):
+            if bank not in used_banks:
+                self.staging.release_bank(request_id, bank)
+
         self._request_resident_layers[request_id] = resident_layers
 
     def get_num_blocks_to_allocate(

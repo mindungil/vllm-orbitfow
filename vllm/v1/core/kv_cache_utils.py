@@ -1422,7 +1422,40 @@ def get_kv_cache_config_from_groups(
     orbitflow_num_staging_banks = 1
     if is_orbitflow_enabled(vllm_config):
         extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config or {}
-        requested = int(extra_config.get("num_staging_blocks", 0))
+        orbitflow_prefetch_distance = int(
+            extra_config.get("prefetch_distance", 2)
+        )
+        orbitflow_num_staging_banks = int(
+            extra_config.get(
+                "num_staging_banks",
+                orbitflow_prefetch_distance + 1,
+            )
+        )
+        if orbitflow_num_staging_banks < orbitflow_prefetch_distance + 1:
+            raise ValueError(
+                "num_staging_banks must be at least prefetch_distance + 1"
+            )
+        num_layers = len(kv_cache_groups)
+        orbitflow_num_resident_layers = int(
+            extra_config.get("num_resident_layers", num_layers)
+        )
+        requested_config = extra_config.get("num_staging_blocks")
+        if requested_config is None:
+            if orbitflow_num_resident_layers < num_layers:
+                physical_groups = (
+                    orbitflow_num_resident_layers + orbitflow_num_staging_banks
+                )
+                requested = max(
+                    orbitflow_num_staging_banks,
+                    num_blocks
+                    * orbitflow_num_staging_banks
+                    // physical_groups,
+                )
+                requested = min(requested, num_blocks - 1)
+            else:
+                requested = 0
+        else:
+            requested = int(requested_config)
         if requested < 0:
             raise ValueError("num_staging_blocks must be non-negative")
         if requested >= num_blocks:
@@ -1430,15 +1463,10 @@ def get_kv_cache_config_from_groups(
                 "num_staging_blocks must be smaller than the GPU KV block count"
             )
         orbitflow_num_staging_blocks = requested
-        orbitflow_num_staging_banks = int(extra_config.get("prefetch_distance", 2)) + 1
         if requested and requested < orbitflow_num_staging_banks:
             raise ValueError(
-                "num_staging_blocks must be at least prefetch_distance + 1"
+                "num_staging_blocks must be at least num_staging_banks"
             )
-        num_layers = len(kv_cache_groups)
-        orbitflow_num_resident_layers = int(
-            extra_config.get("num_resident_layers", num_layers)
-        )
         if not 0 <= orbitflow_num_resident_layers <= num_layers:
             raise ValueError(
                 "num_resident_layers must be between zero and the model layer count"
